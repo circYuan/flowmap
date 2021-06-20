@@ -10,6 +10,9 @@
 #include <climits>
 #include <LEDA/graph/graph.h>
 #include <LEDA/graph/basic_graph_alg.h>
+#include <LEDA/graph/min_cut.h>
+#include <LEDA/graph/max_flow.h>
+#include <set>
 using namespace std;
 using namespace leda;
 
@@ -32,27 +35,39 @@ struct Gate{
 using GateMap = std::map<std::string, Gate>;
 using NameMap = std::map<node, std::string>;
 using EdgeWeight = std::map<edge, int>;
+using Cluster = std::map<std::string, std::vector<std::string>>;
 
 std::string graphName;
 std::vector<Gate> primeInput;
 std::vector<Gate> primeOutput;
 graph bigGraph;
+graph outputGraph;
+GateMap outGM;
+NameMap outNM;
 std::vector<edge> edges;
 GateMap gateMap;
 NameMap nameMap;
+Cluster cluster;
+
+int K_CUT;
 
 
 void readBLIF(char * fileName);
 void decomposeMultiInputGate();
-void updateLabel();
+int updateLabel(GateMap & gateMap, NameMap & nameMap, graph & gra);
 void printGate(GateMap & gateMap);
+void printGate(GateMap & gateMap, NameMap & nameMap, graph & g);
 void printEdge();
 void printEdge(EdgeWeight & ew, GateMap & gateMap);
 void printPrime(std::vector<Gate> & gl, std::string p);
 void writeBLIF(char * fname);
 void makeSubGraph(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap);
 void flowMapPhase1();
-void mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap);
+int mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap);
+node addSource(graph & sg, GateMap * subGateMap, NameMap & subNameMap);
+void phase1TransferGraph(graph & sg, node source, node root, GateMap & subGateMap, NameMap & subNameMap);
+bool findMinCut(graph & sg, node source, node root, GateMap & subGateMap, NameMap & subNameMap);
+void flowMapPhase2();
 
 int main(int argc, char ** argv){
     
@@ -63,7 +78,23 @@ int main(int argc, char ** argv){
     readBLIF(argv[1]);
     decomposeMultiInputGate();
     flowMapPhase1();
+    flowMapPhase2();
+    printGate(outGM);
+    outputGraph.print();
+    //printGate(gateMap);
+    int label = updateLabel(outGM, outNM, outputGraph);
+    //printGate(outGM);
+    cout << "after mapping label: " << label << endl;
 
+    //for(auto & iter : cluster){
+        //cout << "name : " << iter.first << endl;
+        //cout << "cluster: ";
+        //for(auto & n : iter.second){
+            //cout << n << " ";
+        //}
+        //cout << "\n========================\n";
+    //}
+    //printGate(gateMap);
     //bigGraph.print();
     //printPrime(primeInput, "input");
     //writeBLIF(argv[2]);
@@ -90,18 +121,113 @@ int main(int argc, char ** argv){
     return 0;
 }
 
-void mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap){
+void flowMapPhase2(){
+    std::vector<Gate> mappingList = primeOutput;
+    while(!mappingList.empty()){
+        int length = mappingList.size();
+        std::set<std::string> inputList;
+        Gate & g = gateMap[mappingList[0].name];
+        auto & c = cluster[g.name];
+        for(auto & cName : c){
+            //cout << cName << endl;
+            Gate & gg = gateMap[cName];
+            leda::list<edge> elist = bigGraph.in_edges(gg.gNode);
+            while(!elist.empty()){
+                edge e = elist.Pop();
+                node n = e->terminal(0);
+                if(gateMap[nameMap[n]].label < g.label){
+                    if(!gateMap[nameMap[n]].isPI){
+                        bool add = true;
+                        for(int i = 0; i < length; ++i){
+                            Gate & og = mappingList[i];
+                            if(og.name == nameMap[n]){
+                                add = false;
+                                break;
+                            }
+                        }
+                        if(add){
+                            mappingList.push_back(gateMap[nameMap[n]]);
+                        }
+                        inputList.insert(nameMap[n] + "LUT");
+                    }
+                    else{
+                        Gate pi = gateMap[nameMap[n]];
+                        pi.name = pi.name + "LUT";
+                        if(outGM.find(nameMap[n] + "LUT") == outGM.end()){
+                            pi.gNode = outputGraph.new_node();
+                            outGM[pi.name] = pi;
+                            outNM[pi.gNode] = pi.name;
+                        }
+                        inputList.insert(pi.name);
+                    }
+                }
+            }
+        }
+        Gate lut(g.name + "LUT", g.lName + "LUT", g.isPI, g.isPO, c, {}, outputGraph.new_node(), -1);
+        std::copy(inputList.begin(), inputList.end(), std::back_inserter(lut.inputs));
+        outGM[lut.name] = lut;
+        outNM[lut.gNode] = lut.name;
+        mappingList.erase(mappingList.begin());
+    }
+   
+    node v;
+    forall_nodes(v, outputGraph){
+        Gate & g = outGM[outNM[v]];
+        auto & ns = g.inputs;
+        for(auto & n : ns){
+            Gate & gg = outGM[n];
+            outputGraph.new_edge(gg.gNode, g.gNode);
+        }
+    }
+}
+
+bool findMinCut(graph & sg, node source, node root, GateMap & subGateMap, NameMap & subNameMap){
+    root = subGateMap[nameMap[root]].gNode;
+    leda::edge_array<int> weight(sg);
+    //add weight
+    leda::list<edge> edgeList = sg.all_edges();
+    while(!edgeList.empty()){
+        //cout << "is in\n";
+        edge e = edgeList.Pop();
+        node from = e->terminal(0);
+        node to = e->terminal(1);
+        Gate & fg = subGateMap[subNameMap[from]];
+        Gate & tg = subGateMap[subNameMap[to]];
+        //cout << fg.name << " " << tg.name << endl;
+        if(fg.name == tg.name + "p"){
+            //cout << "clone gate: " << fg.name << endl;
+            weight[e] = 1;
+        }
+        else{
+            weight[e] = 1000;
+        }
+    }
+    K_CUT = 3;
+    leda::edge_array<int> flow;
+    //edge ee;
+    //forall_edges(ee, sg){
+        //cout << weight[ee] << endl;
+    //}
+    int cut_value = MAX_FLOW(sg, source, root, weight, flow);
+    edge e;
+    //if(subNameMap[root] == "y1"){
+        //cout << "y1 cut value: " << cut_value << endl;
+    //}
+    return cut_value <= K_CUT;
+}
+
+int mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap){
     root = subGateMap[nameMap[root]].gNode;
     std::queue<node> nodeQueue;
     nodeQueue.push(root);
     int maxLabel = 0;
     leda::list<edge> el = sg.in_edges(root);
+    GateMap tmpGateMap;
     while(!el.empty()){
         edge e = el.Pop();
         node n = e->terminal(0);
         maxLabel = subGateMap[subNameMap[n]].label > maxLabel ? subGateMap[subNameMap[n]].label : maxLabel;
     }
-    cout << "max label: " << maxLabel << endl;
     while(!nodeQueue.empty()){
         node n = nodeQueue.front();
         nodeQueue.pop();
@@ -109,7 +235,10 @@ void mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & su
         while(!iedgeList.empty()){
             edge e = iedgeList.Pop();
             node nn = e->terminal(0);
-            nodeQueue.push(nn);
+            if(tmpGateMap.find(subNameMap[nn]) == tmpGateMap.end()){
+                nodeQueue.push(nn);
+                tmpGateMap[subNameMap[nn]] = subGateMap[subNameMap[nn]];
+            }
         }
         leda::list<edge> edgeList = sg.out_edges(n);
         Gate & g = subGateMap[subNameMap[n]];
@@ -117,10 +246,16 @@ void mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & su
             edge e = edgeList.Pop();
             node nn = e->terminal(1);
             if(subGateMap[subNameMap[nn]].label == maxLabel){
+                //if(subNameMap[root] == "y1"){
+                    //cout << "label y1: " << subNameMap[nn] << endl;
+                //}
                 sg.new_edge(n, root);
+                break;
             }
         }
     }
+
+    //delete node
     nodeQueue.push(root);
     while(!nodeQueue.empty()){
         node n = nodeQueue.front();
@@ -133,7 +268,65 @@ void mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & su
         }
         Gate & g = subGateMap[subNameMap[n]];
         if(g.label == maxLabel){
+            //if(subNameMap[root] == "y1"){
+                //cout << "label y1: " << g.name << endl;
+            //}
+            cluster[subNameMap[root]].push_back(g.name);
             sg.del_node(n);
+            subNameMap.erase(subNameMap.find(g.gNode));
+            subGateMap.erase(subGateMap.find(g.name));
+        }
+    }
+    return maxLabel;
+}
+
+node addSource(graph & sg, GateMap & subGateMap, NameMap & subNameMap){
+    node source = sg.new_node();
+    for(auto g : subGateMap){
+        if(g.second.isPI){
+            sg.new_edge(source, g.second.gNode);
+        }
+    }
+    Gate sourceGate("source", "source", false, false, {}, {}, source, -1);
+    subGateMap["source"] = sourceGate;
+    subNameMap[source] = "source";
+    return source;
+}
+
+void phase1TransferGraph(graph & sg, node source, node root, GateMap & subGateMap, NameMap & subNameMap){
+    root = subGateMap[nameMap[root]].gNode;
+    std::queue<node> nodeQueue;
+    nodeQueue.push(root);
+    GateMap tmpNodeList;
+    while(!nodeQueue.empty()){
+        node n = nodeQueue.front();
+        nodeQueue.pop();
+        leda::list<edge> el = sg.in_edges(n);
+        while(!el.empty()){
+            edge e = el.Pop();
+            node nn = e->terminal(0);
+            if(tmpNodeList.find(subNameMap[nn]) == tmpNodeList.end()){
+                nodeQueue.push(nn);
+                tmpNodeList[subNameMap[nn]] = subGateMap[subNameMap[nn]];
+            }
+        }
+        if(n != source && n != root){
+            //add new node to self and set edge weight;
+            Gate & ng = subGateMap[subNameMap[n]];
+            //cout << "name: " << ng.name << endl;;
+            node np = sg.new_node();
+            Gate ngp(ng.name+"p", ng.lName + "p", ng.isPI, ng.isPO, {}, {}, np, ng.label);
+            subGateMap[ngp.name] = ngp;
+            subNameMap[ngp.gNode] = ngp.name;
+            leda::list<edge> inEdge = sg.in_edges(n);
+            while(!inEdge.empty()){
+                edge e = inEdge.Pop();
+                node nn = e->terminal(0);
+                sg.new_edge(nn, np);
+            }
+            inEdge = sg.in_edges(n);
+            sg.del_edges(inEdge);
+            sg.new_edge(np, n);
         }
     }
 }
@@ -152,10 +345,24 @@ void flowMapPhase1(){
             GateMap subGM;
             NameMap subNM;
             makeSubGraph(sg, n, subGM, subNM);
-            mergeMaxLabelNode(sg, n, subGM, subNM);
-            sg.print();
-            //printGate(subGM);
-            //printEdge(subEW, subGM);
+            node source = addSource(sg, subGM, subNM);
+            int p = mergeMaxLabelNode(sg, n, subGM, subNM);
+            //if(nameMap[n] == "y1"){
+                //printGate(subGM);
+            //}
+            phase1TransferGraph(sg, source, n, subGM, subNM);
+            if(findMinCut(sg, source, n, subGM, subNM)){
+                gateMap[nameMap[n]].label = p;
+                cluster[nameMap[n]].push_back(nameMap[n]);
+            }            
+            else{
+                gateMap[nameMap[n]].label = p + 1;
+                cluster[nameMap[n]] = {nameMap[n]};
+            }
+            //if(nameMap[n] == "y1"){
+                //printGate(subGM, subNM, sg);
+                //sg.print();
+            //}
         }
     }
 
@@ -184,7 +391,6 @@ void makeSubGraph(graph & sg, node root, GateMap & subGateMap, NameMap & subName
             edge ee = el.Pop();
             node nn = ee->terminal(0);
             if(subGateMap.find(nameMap[nn]) != subGateMap.end()){
-                cout << "is in\n";
                 sg.new_edge(subGateMap[nameMap[nn]].gNode, g.gNode);
             }
             else{
@@ -255,6 +461,20 @@ void printEdge(){
         edge e = edges[i];
         cout << "from: " << gateMap[nameMap[(e->terminal(0))]].name << " to " << gateMap[nameMap[(e->terminal(1))]].name << endl;
     }
+}
+
+void printGate(GateMap & gateMap, NameMap & nameMap, graph & g){
+    node n;
+    cout << "********************\n";
+    forall_nodes(n, g){
+        Gate & gg = gateMap[nameMap[n]];
+        cout << "Gate info:\n";
+        cout << "name: " << gg.name << endl;
+        g.print_node(n);
+        cout << endl;
+        cout << "==============\n";
+    }
+    cout << "********************\n";
 }
 
 void printGate(GateMap & gateMap){
@@ -422,7 +642,7 @@ void decomposeMultiInputGate(){
             sortNodes.sort(f);
             int count = 1;
             while(!sortNodes.empty()){
-                std::string newName = og.name + std::to_string(count);
+                std::string newName = og.name + "sub" + std::to_string(count);
                 node n1 = sortNodes.front();
                 sortNodes.pop_front();
                 node n2 = sortNodes.front();
@@ -528,18 +748,19 @@ void decomposeMultiInputGate(){
             //cout << "mutiple input gate should be decompose: " << gateMap[nameMap[i]].name << endl;
         }
     }
-    updateLabel();
+    int label = updateLabel(gateMap, nameMap, bigGraph);
+    cout << "before mapping label: " << label << endl;
 }
 
-void updateLabel(){
-    node_array<int> ord(bigGraph);
-    TOPSORT(bigGraph, ord);
+int updateLabel(GateMap & gateMap, NameMap & nameMap, graph & gra){
+    node_array<int> ord(gra);
+    TOPSORT(gra, ord);
     node v;
     std::vector<node> topoOrderNode(gateMap.size());
-    forall_nodes(v, bigGraph){
+    forall_nodes(v, gra){
         topoOrderNode[ord[v] - 1] = v;
     }
-
+    int max = 0;
     for(auto & n : topoOrderNode){
         Gate & g = gateMap[nameMap[n]];
         if(!g.isPI){
@@ -550,7 +771,8 @@ void updateLabel(){
                 }
             }
             g.label = maxl + 1;
+            max = g.label;
         }
     }
-
+    return max;
 }
