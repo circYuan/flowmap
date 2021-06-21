@@ -74,24 +74,28 @@ char computeGateOutput(std::vector<std::string> & table, std::vector<std::string
 
 int main(int argc, char ** argv){
     
-    if(argc != 3){
+    if(argc != 4){
         return -1;
     }
     //cout << gateMap.size() << endl;
+    K_CUT = std::stoi(argv[3]);
     readBLIF(argv[1]);
-    //decomposeMultiInputGate();
-    //flowMapPhase1();
-    //flowMapPhase2();
+    //printGate(gateMap, nameMap, bigGraph);
+    //bigGraph.print();
     //printGate(gateMap);
-    //createLUTTable(outGM, outNM, outputGraph);
+    decomposeMultiInputGate();
+    flowMapPhase1();
+    flowMapPhase2();
+    //printGate(gateMap);
+    createLUTTable(outGM, outNM, outputGraph);
     //outputGraph.print();
     //printGate(gateMap);
-    //int label = updateLabel(outGM, outNM, outputGraph);
+    int label = updateLabel(outGM, outNM, outputGraph);
     //printGate(outGM);
     //printGate(outGM);
-    //cout << "after mapping label: " << label << endl;
+    cout << "after mapping label: " << label << endl;
 
-    //writeBLIF(argv[2], outputGraph, true, outGM, outNM);
+    writeBLIF(argv[2], outputGraph, true, outGM, outNM);
 
 
     return 0;
@@ -287,7 +291,6 @@ bool findMinCut(graph & sg, node source, node root, GateMap & subGateMap, NameMa
             weight[e] = 1000;
         }
     }
-    K_CUT = 3;
     leda::edge_array<int> flow;
     //edge ee;
     //forall_edges(ee, sg){
@@ -594,7 +597,7 @@ void readBLIF(char * fileName){
     std::string line;
     Gate * curGate = nullptr;
     while(getline(inputBLIF, line)){
-        std::cout << line << endl;
+        //std::cout << line << endl;
         std::stringstream ss(line);
         std::string mode;
         ss >> mode;
@@ -613,17 +616,9 @@ void readBLIF(char * fileName){
                     ss.clear();
                 }
                 else{
-                    Gate gate;
-                    gate.name = name;
-                    gate.lName = name.data();
-                    gate.isPI = true;
-                    gate.isPO = false;
-                    gate.gNode = bigGraph.new_node();
-                    gate.label = 0;
+                    Gate gate(name, name.c_str(), true, false, {}, {}, bigGraph.new_node(), 0);
                     gateMap[name] = gate;
                     nameMap[gate.gNode] = name;
-                    //cout << bigGraph.get_node_entry_string(gate.gNode).c_str() << endl;
-                    //cout << name << endl;
                     primeInput.push_back(gate);
                 }
             }
@@ -637,12 +632,7 @@ void readBLIF(char * fileName){
                     ss.clear();
                 }
                 else{
-                    Gate gate;
-                    gate.name = name;
-                    gate.lName = name.data();
-                    gate.isPI = false;
-                    gate.isPO = true;
-                    gate.gNode = bigGraph.new_node();
+                    Gate gate(name, name.c_str(), false, true, {}, {}, bigGraph.new_node(), -1);
                     gateMap[name] = gate;
                     nameMap[gate.gNode] = name;
                     primeOutput.push_back(gate);
@@ -654,9 +644,9 @@ void readBLIF(char * fileName){
             std::vector<std::string> inputs;
             while(ss >> input){
                 if(input == "\\"){
-                    cout << "fuck damn\n";
+                    cout << "this situation I don't handle\n";
                 }
-                cout << "input: " << input << endl;
+                //cout << "input: " << input << endl;
                 inputs.push_back(input);
             }
             std::string name;
@@ -669,24 +659,11 @@ void readBLIF(char * fileName){
                 curGate->inputs = inputs;
             }
             else{
-                Gate g;
-                g.name = name;
-                g.lName = name.c_str();
-                g.isPI = false;
-                g.isPO = false;
-                g.gNode = bigGraph.new_node();
-                g.inputs = inputs;
+                Gate g(name, name.c_str(), false, false, {}, inputs, bigGraph.new_node(), -1);
                 gateMap[name] = g;
                 nameMap[g.gNode] = name;
                 curGate = &gateMap[name];
             }
-            int labelMax = 0;
-            for(auto & n : inputs){
-                labelMax = gateMap[n].label > labelMax ? gateMap[n].label : labelMax;
-                edge e = bigGraph.new_edge(gateMap[n].gNode, curGate->gNode);
-                edges.push_back(e);
-            }
-            curGate->label = labelMax + 1;
         }
         else{
             if(curGate != nullptr){
@@ -697,9 +674,19 @@ void readBLIF(char * fileName){
                 return;
             }
         }
-        //remain edge weight depth
     }
     curGate = nullptr;
+
+    node v;
+    forall_nodes(v, bigGraph){
+        Gate & g = gateMap[nameMap[v]];
+        for(auto & name : g.inputs){
+            Gate & gg = gateMap[name];
+            edge e = bigGraph.new_edge(gg.gNode, g.gNode);
+            edges.push_back(e);
+        }
+    }
+    updateLabel(gateMap, nameMap, bigGraph);
     inputBLIF.close();
 }
 
