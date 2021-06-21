@@ -8,11 +8,12 @@
 #include <list>
 #include <queue>
 #include <climits>
+#include <set>
+#include <bitset>
 #include <LEDA/graph/graph.h>
 #include <LEDA/graph/basic_graph_alg.h>
 #include <LEDA/graph/min_cut.h>
 #include <LEDA/graph/max_flow.h>
-#include <set>
 using namespace std;
 using namespace leda;
 
@@ -60,7 +61,7 @@ void printGate(GateMap & gateMap, NameMap & nameMap, graph & g);
 void printEdge();
 void printEdge(EdgeWeight & ew, GateMap & gateMap);
 void printPrime(std::vector<Gate> & gl, std::string p);
-void writeBLIF(char * fname);
+void writeBLIF(char * fname, graph & gra, bool afterMapping, GateMap & gm, NameMap & nm);
 void makeSubGraph(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap);
 void flowMapPhase1();
 int mergeMaxLabelNode(graph & sg, node root, GateMap & subGateMap, NameMap & subNameMap);
@@ -68,6 +69,8 @@ node addSource(graph & sg, GateMap * subGateMap, NameMap & subNameMap);
 void phase1TransferGraph(graph & sg, node source, node root, GateMap & subGateMap, NameMap & subNameMap);
 bool findMinCut(graph & sg, node source, node root, GateMap & subGateMap, NameMap & subNameMap);
 void flowMapPhase2();
+void createLUTTable(GateMap & gm, NameMap & nm, graph & gra);
+char computeGateOutput(std::vector<std::string> & table, std::vector<std::string> & input, std::map<std::string, char> & inputMap);
 
 int main(int argc, char ** argv){
     
@@ -76,49 +79,131 @@ int main(int argc, char ** argv){
     }
     //cout << gateMap.size() << endl;
     readBLIF(argv[1]);
-    decomposeMultiInputGate();
-    flowMapPhase1();
-    flowMapPhase2();
-    printGate(outGM);
-    outputGraph.print();
+    //decomposeMultiInputGate();
+    //flowMapPhase1();
+    //flowMapPhase2();
     //printGate(gateMap);
-    int label = updateLabel(outGM, outNM, outputGraph);
+    //createLUTTable(outGM, outNM, outputGraph);
+    //outputGraph.print();
+    //printGate(gateMap);
+    //int label = updateLabel(outGM, outNM, outputGraph);
     //printGate(outGM);
-    cout << "after mapping label: " << label << endl;
+    //printGate(outGM);
+    //cout << "after mapping label: " << label << endl;
 
-    //for(auto & iter : cluster){
-        //cout << "name : " << iter.first << endl;
-        //cout << "cluster: ";
-        //for(auto & n : iter.second){
-            //cout << n << " ";
-        //}
-        //cout << "\n========================\n";
-    //}
-    //printGate(gateMap);
-    //bigGraph.print();
-    //printPrime(primeInput, "input");
-    //writeBLIF(argv[2]);
-    //printPrime(primeOutput);
+    //writeBLIF(argv[2], outputGraph, true, outGM, outNM);
 
-    //node_array<int> ord(bigGraph);
-    //TOPSORT(bigGraph, ord);
-    //node v;
-    //forall_nodes(v, bigGraph){
-        //cout << gateMap[nameMap[v]].name << " ";
-        //cout << ord[v] << endl;
-    //}
-    //for(auto & iter : gateMap){
-        //cout << "name: " << iter.second.name << endl;
-        //cout << "label: " << iter.second.label << endl;
-    //}
-
-    //bigGraph.print();
-    //for(int i = 0;i < primeInput.size(); ++i){
-        //cout << nameMap[primeInput[i].gNode] << endl;
-    //}
-    
 
     return 0;
+}
+
+
+void createLUTTable(GateMap & gm, NameMap & nm, graph & gra){
+    for(auto & iter : gm){
+        Gate & g = iter.second;
+        if(!g.isPI){
+            graph sg;
+            std::map<std::string, char> inputList;
+            NameMap subNM;
+            std::map<std::string, node> nodeName;
+            cout << "LUT: " << g.name << endl;
+            // initialize input with order;
+            for(auto name : g.inputs){
+                Gate & ing = gm[name];
+                if(!ing.isPI){
+                    name.erase(name.rfind("LUT"));
+                }
+                inputList[name] = '-';
+            }
+            // gen subgraph node
+            for(auto & name : g.table){
+                node n = sg.new_node();
+                nodeName[name] = n;
+                subNM[n] = name;
+            }
+            //gen subgraph edge;
+            for(auto & name : g.table){
+                Gate & gg = gateMap[name];
+                for(auto & iname : gg.inputs){
+                    if(!(std::find(g.table.begin(), g.table.end(), iname) == g.table.end())){
+                        sg.new_edge(nodeName[iname], nodeName[name]);
+                    }
+                }
+            }
+            //sg.print();
+            //topoorder gen input
+            node_array<int> ord(sg);
+            TOPSORT(sg, ord);
+            node v;
+            std::vector<node> topoOrderNode(sg.number_of_nodes());
+            forall_nodes(v, sg){
+                topoOrderNode[ord[v] - 1] = v;
+            }
+            int bitsLength = inputList.size();
+            int maxBit = std::pow(2, bitsLength);
+            //cout << "input max bit: " << maxBit << endl;
+            //g.table.clear();
+            std::vector<std::string> table;
+            std::map<std::string, char> tmp = inputList;
+            cout << "bit length: " << bitsLength << endl;
+            for(int num = 0; num < maxBit; ++num){
+                std::bitset<16> inputB(num);
+                std::string inputBS = inputB.to_string().substr(16 - bitsLength);
+                int index = 0;
+                inputList = tmp;
+                for(auto & c : inputList){
+                    c.second = inputBS[index];
+                    //cout << "in: " << c.first << " " << "bit: " << c.second << endl;
+                    ++index;
+                }
+                //cout << inputBS << endl;
+                for(node & n : topoOrderNode){
+                    std::string & name = subNM[n];
+                    //cout << "in LUT sub node: " << name << endl;
+                    inputList[name] = computeGateOutput(gateMap[name].table, gateMap[name].inputs, inputList);
+                }
+                if(inputList[subNM[topoOrderNode[topoOrderNode.size() - 1]]] == '1'){
+                    table.push_back(inputBS + " 1");
+                }
+            }
+            g.table = table;
+        }
+    }
+}
+
+char computeGateOutput(std::vector<std::string> & table, std::vector<std::string> & input, std::map<std::string, char> & inputMap){
+    if(input.size() == 1){
+        if(inputMap[input[0]] == table[0][0]){
+            return '1';
+        }
+    }
+    else{
+        if(table.size() > 1){
+            bool out = false;
+            //or gate
+            //cout << "input size: " << input.size() << endl;
+            for(int i = 0; i < input.size(); ++i){
+                //cout << "input: " << input[i] << endl;
+                if(inputMap[input[i]] == table[i][i]){
+                    out = true;
+                }
+            }
+            //cout << "---**************\n";
+            return out? '1' : '0';
+        }
+        else{
+            bool out = true;
+            for(int i = 0; i < input.size(); ++i){
+                if(inputMap[input[i]] != table[0][i] && table[0][i] != '-'){
+                    out = false;
+                    break;
+                }
+            }
+            return out ? '1' : '0';
+            //and gate
+        }
+    }
+    return '-';
 }
 
 void flowMapPhase2(){
@@ -152,8 +237,8 @@ void flowMapPhase2(){
                     }
                     else{
                         Gate pi = gateMap[nameMap[n]];
-                        pi.name = pi.name + "LUT";
-                        if(outGM.find(nameMap[n] + "LUT") == outGM.end()){
+                        pi.name = pi.name;// + "LUT";
+                        if(outGM.find(nameMap[n]) == outGM.end()){
                             pi.gNode = outputGraph.new_node();
                             outGM[pi.name] = pi;
                             outNM[pi.gNode] = pi.name;
@@ -406,12 +491,12 @@ void makeSubGraph(graph & sg, node root, GateMap & subGateMap, NameMap & subName
 }
 
 
-void writeBLIF(char * fname){
-    node_array<int> ord(bigGraph);
-    TOPSORT(bigGraph, ord);
+void writeBLIF(char * fname, graph & gra, bool afterMapping, GateMap & gm, NameMap & nm){
+    node_array<int> ord(gra);
+    TOPSORT(gra, ord);
     node v;
-    std::vector<node> topoOrderNode(gateMap.size());
-    forall_nodes(v, bigGraph){
+    std::vector<node> topoOrderNode(gra.number_of_nodes());
+    forall_nodes(v, gra){
         topoOrderNode[ord[v] - 1] = v;
     }
     ofstream outputfile(fname);
@@ -422,11 +507,16 @@ void writeBLIF(char * fname){
     }
     outputfile << "\n.outputs ";
     for(auto & g : primeOutput){
-        outputfile << g.name << " ";
+        if(afterMapping){
+            outputfile << g.name + "LUT" << " ";
+        }
+        else{
+            outputfile << g.name << " ";
+        }
     }
     outputfile << endl;
     for(auto & n : topoOrderNode){
-        Gate & g = gateMap[nameMap[n]];
+        Gate & g = gm[nm[n]];
         if(!g.isPI){
             outputfile << ".names ";
             for(auto & n : g.inputs){
@@ -504,6 +594,7 @@ void readBLIF(char * fileName){
     std::string line;
     Gate * curGate = nullptr;
     while(getline(inputBLIF, line)){
+        std::cout << line << endl;
         std::stringstream ss(line);
         std::string mode;
         ss >> mode;
@@ -565,6 +656,7 @@ void readBLIF(char * fileName){
                 if(input == "\\"){
                     cout << "fuck damn\n";
                 }
+                cout << "input: " << input << endl;
                 inputs.push_back(input);
             }
             std::string name;
